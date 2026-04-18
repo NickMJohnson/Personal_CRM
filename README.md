@@ -27,27 +27,27 @@ This agent does.
 
 ## What it does
 
-- 🎙 **Captures automatically.** Every meeting you take in Granola flows
+-  **Captures automatically.** Every meeting you take in Granola flows
   through Zapier into Supabase as structured contact notes, with attendees
   extracted and the relevant details filtered in.
-- 🧠 **Remembers selectively.** Only durable, decision-useful signal is
+-  **Remembers selectively.** Only durable, decision-useful signal is
   saved — who someone is, what they're working on, commitments you made.
   Meeting logistics and small talk get dropped.
-- 🗣 **Asks when unsure.** When a first name is ambiguous ("Mike"?) or
+-  **Asks when unsure.** When a first name is ambiguous ("Mike"?) or
   context is missing, the agent texts you a single disambiguation question
   before writing anything to the database.
-- 📅 **Writes to your calendar.** Birthdays, anniversaries, and follow-up
+-  **Writes to your calendar.** Birthdays, anniversaries, and follow-up
   deadlines become recurring Google Calendar events, synced automatically.
-- 📱 **Texts you the right thing at the right time.**
+-  **Texts you the right thing at the right time.**
   - **~15 min before a meeting:** a dossier on the attendees
     (company, relationship, most recent note, when you last talked).
   - **9am daily briefing:** three sections —
-    🎂 birthdays this week, 📅 upcoming events in the next 30 days,
-    👋 recommended people to reach out to with a one-line *about-what*
+     birthdays this week,  upcoming events in the next 30 days,
+     recommended people to reach out to with a one-line *about-what*
     suggestion pulled from their most recent note.
   - **1pm & 5pm nudges:** a quick text if any birthday or event is happening
     *today*, so nothing slips.
-- 🔍 **Answers on demand.** Text *"what do I know about Jane?"* and get a
+-  **Answers on demand.** Text *"what do I know about Jane?"* and get a
   concise brief back in seconds.
 
 ---
