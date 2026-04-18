@@ -8,13 +8,19 @@ your calendar via the Google Calendar connector. On scheduled runs it
 sends iMessage reminders for upcoming meetings with CRM notes on the
 attendees.
 
+Each tool is SELF-CONTAINED: Ara's runtime ships each tool's source
+independently, so module-level helpers are not visible inside tool
+execution. The Supabase client is inlined as a nested function in every
+tool that needs it.
+
 HOW TO RUN:
   1) Create a Supabase project at https://supabase.com (free tier).
   2) Open the SQL editor, paste schema.sql, and run it.
   3) In Supabase → Settings → API, grab:
        - Project URL              -> SUPABASE_URL
        - service_role secret key  -> SUPABASE_KEY
-  4) In app.ara.so → your personal-crm agent → secrets, set those two.
+  4) Put both in .env at the project root (ara deploy picks them up and
+     uploads them as runtime secrets).
   5) pip install ara-sdk
   6) ara auth login
   7) At app.ara.so/connect, connect: Linq (iMessage), Google Calendar
@@ -22,84 +28,38 @@ HOW TO RUN:
   9) In the dashboard, set cron to */10 * * * * and enable it.
 """
 
-import json
-import urllib.parse
-import urllib.request
-from datetime import datetime, date, timezone
-
 import ara_sdk as ara
 
 
 # ---------------------------------------------------------------------------
-# Supabase client — pure stdlib. Talks to PostgREST directly.
+# Diagnostic
 # ---------------------------------------------------------------------------
-def _sb_request(method: str, path: str, body: dict | list | None = None,
-                params: dict | None = None, prefer: str = "") -> list | dict:
-    """
-    Minimal Supabase REST helper.
-
-    method: GET / POST / PATCH / DELETE
-    path:   table path, e.g. "contacts" or "contact_notes"
-    params: dict of PostgREST query params (e.g. {"name": "eq.Jane"})
-    prefer: value for the Prefer header (e.g. "return=representation")
-    """
-    base = ara.secret("SUPABASE_URL").rstrip("/")
-    key = ara.secret("SUPABASE_KEY")
-
-    url = f"{base}/rest/v1/{path}"
-    if params:
-        url += "?" + urllib.parse.urlencode(params, safe="=.,")
-
-    data = None
-    headers = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
-    }
-    if prefer:
-        headers["Prefer"] = prefer
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        raw = resp.read().decode("utf-8", errors="replace")
-        if not raw:
-            return []
-        return json.loads(raw)
-
-
-def _find_contact_id_by_name(name: str) -> str | None:
-    """Case-insensitive exact-name match. Returns contact uuid or None."""
-    rows = _sb_request(
-        "GET",
-        "contacts",
-        params={"name": f"ilike.{name.strip()}", "select": "id,name", "limit": "1"},
-    )
-    return rows[0]["id"] if rows else None
-
-
-def _fetch_contact_full(cid: str) -> dict:
-    """Fetch a contact with its notes and dates embedded."""
-    rows = _sb_request(
-        "GET",
-        "contacts",
-        params={
-            "id": f"eq.{cid}",
-            "select": "*,contact_notes(text,source,at),contact_dates(label,date_iso,synced_to_calendar)",
-        },
-    )
-    if not rows:
-        return {}
-    c = rows[0]
-    # Normalize the embedded relation names so tools return consistent shapes.
-    c["notes"] = sorted(c.pop("contact_notes", []) or [], key=lambda n: n["at"])
-    c["dates"] = c.pop("contact_dates", []) or []
-    return c
+@ara.tool
+def debug_supabase_connect() -> dict:
+    """Report whether SUPABASE_URL/SUPABASE_KEY are present and whether a
+    basic GET against the contacts table succeeds. For debugging only."""
+    import os, json, urllib.parse, urllib.request
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
+    if not url or not key:
+        return {"ok": False, "url_present": bool(url), "key_present": bool(key),
+                "error": "Missing SUPABASE_URL or SUPABASE_KEY in runtime env."}
+    try:
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/rest/v1/contacts?select=id&limit=1",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read().decode()
+        return {"ok": True, "url_present": True, "key_present": True,
+                "sample": body[:120]}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "url_present": True, "key_present": True,
+                "error": f"{type(e).__name__}: {e}"}
 
 
 # ---------------------------------------------------------------------------
-# Core CRM tools
+# Core CRM tools — each one is self-contained
 # ---------------------------------------------------------------------------
 @ara.tool
 def add_contact(
@@ -122,10 +82,28 @@ def add_contact(
         phone: Phone number.
         tags: Comma-separated tags.
     """
-    existing = _find_contact_id_by_name(name)
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    existing = sb("GET", "contacts",
+                  params={"name": f"ilike.{name.strip()}", "select": "id,name", "limit": "1"})
     if existing:
-        return {"ok": True, "id": existing, "created": False,
-                "contact": _fetch_contact_full(existing)}
+        return {"ok": True, "id": existing[0]["id"], "created": False}
 
     payload = {
         "name": name.strip(),
@@ -135,8 +113,7 @@ def add_contact(
         "phone": phone.strip(),
         "tags": [t.strip() for t in tags.split(",") if t.strip()],
     }
-    rows = _sb_request("POST", "contacts", body=payload,
-                       prefer="return=representation")
+    rows = sb("POST", "contacts", body=payload, prefer="return=representation")
     c = rows[0] if rows else {}
     return {"ok": True, "id": c.get("id"), "created": True, "contact": c}
 
@@ -149,25 +126,40 @@ def append_note(name: str, note: str, source: str = "manual") -> dict:
     Args:
         name: Name of the contact.
         note: The note text.
-        source: Where the note came from (e.g. 'meeting', 'manual', 'email').
+        source: Where the note came from ('meeting', 'granola', 'manual', 'email').
     """
-    cid = _find_contact_id_by_name(name)
-    if not cid:
-        created = add_contact(name=name)
-        cid = created["id"]
+    import os, json, urllib.parse, urllib.request
+    from datetime import datetime, timezone
 
-    _sb_request(
-        "POST",
-        "contact_notes",
-        body={"contact_id": cid, "text": note.strip(), "source": source},
-    )
-    # Touch last_contact on the parent contact.
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    found = sb("GET", "contacts",
+               params={"name": f"ilike.{name.strip()}", "select": "id", "limit": "1"})
+    if found:
+        cid = found[0]["id"]
+    else:
+        created = sb("POST", "contacts", body={"name": name.strip(), "tags": []},
+                     prefer="return=representation")
+        cid = created[0]["id"]
+
+    sb("POST", "contact_notes",
+       body={"contact_id": cid, "text": note.strip(), "source": source})
     today = datetime.now(timezone.utc).date().isoformat()
-    _sb_request(
-        "PATCH", "contacts",
-        params={"id": f"eq.{cid}"},
-        body={"last_contact": today},
-    )
+    sb("PATCH", "contacts", params={"id": f"eq.{cid}"}, body={"last_contact": today})
     return {"ok": True, "id": cid}
 
 
@@ -181,30 +173,74 @@ def add_important_date(name: str, label: str, date_iso: str) -> dict:
         label: What the date is (e.g. 'birthday', 'anniversary', 'follow-up').
         date_iso: Date in YYYY-MM-DD format.
     """
-    cid = _find_contact_id_by_name(name)
-    if not cid:
-        return {"ok": False, "error": f"No contact named '{name}'. Call add_contact first."}
+    import os, json, urllib.parse, urllib.request
+    from datetime import datetime
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
 
     try:
         datetime.fromisoformat(date_iso)
     except ValueError:
         return {"ok": False, "error": f"Invalid date '{date_iso}'. Use YYYY-MM-DD."}
 
-    rows = _sb_request(
-        "POST", "contact_dates",
-        body={"contact_id": cid, "label": label.strip().lower(), "date_iso": date_iso},
-        prefer="return=representation",
-    )
+    found = sb("GET", "contacts",
+               params={"name": f"ilike.{name.strip()}", "select": "id", "limit": "1"})
+    if not found:
+        return {"ok": False, "error": f"No contact named '{name}'. Call add_contact first."}
+    cid = found[0]["id"]
+
+    rows = sb("POST", "contact_dates",
+              body={"contact_id": cid, "label": label.strip().lower(), "date_iso": date_iso},
+              prefer="return=representation")
     return {"ok": True, "id": cid, "date": rows[0] if rows else None}
 
 
 @ara.tool
 def lookup_contact(name: str) -> dict:
     """Return everything stored about a contact by name."""
-    cid = _find_contact_id_by_name(name)
-    if not cid:
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    rows = sb("GET", "contacts", params={
+        "name": f"ilike.{name.strip()}",
+        "select": "*,contact_notes(text,source,at),contact_dates(label,date_iso,synced_to_calendar)",
+        "limit": "1",
+    })
+    if not rows:
         return {"ok": False, "error": f"No contact named '{name}'."}
-    return {"ok": True, "contact": _fetch_contact_full(cid)}
+    c = rows[0]
+    c["notes"] = sorted(c.pop("contact_notes", []) or [], key=lambda n: n["at"])
+    c["dates"] = c.pop("contact_dates", []) or []
+    return {"ok": True, "contact": c}
 
 
 @ara.tool
@@ -215,11 +251,28 @@ def list_contacts(tag: str = "") -> dict:
     Args:
         tag: If provided, only return contacts with this tag.
     """
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
     params = {"select": "name,company,last_contact,tags", "order": "name"}
     if tag:
-        # PostgREST array contains: tags=cs.{<value>}
         params["tags"] = f"cs.{{{tag.strip()}}}"
-    rows = _sb_request("GET", "contacts", params=params)
+    rows = sb("GET", "contacts", params=params)
     summary = [{"name": r["name"], "company": r.get("company"),
                 "last_contact": r.get("last_contact")} for r in rows]
     return {"ok": True, "count": len(summary), "contacts": summary}
@@ -233,10 +286,26 @@ def upcoming_dates(days_ahead: int = 30) -> dict:
     Args:
         days_ahead: How many days to look ahead.
     """
-    rows = _sb_request(
-        "GET", "contact_dates",
-        params={"select": "label,date_iso,contacts(name)"},
-    )
+    import os, json, urllib.parse, urllib.request
+    from datetime import date
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    rows = sb("GET", "contact_dates", params={"select": "label,date_iso,contacts(name)"})
     today = date.today()
     hits = []
     for d in rows:
@@ -267,34 +336,45 @@ def stale_contacts(days: int = 60) -> dict:
     Return contacts you haven't talked to in `days` days — includes the most
     recent note on each so the agent can recommend WHAT to follow up about.
     """
-    rows = _sb_request(
-        "GET", "contacts",
-        params={"select": "name,last_contact,relationship,contact_notes(text,at)"},
-    )
+    import os, json, urllib.parse, urllib.request
+    from datetime import date
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    rows = sb("GET", "contacts", params={
+        "select": "name,last_contact,relationship,contact_notes(text,at)",
+    })
     today = date.today()
     stale = []
     for c in rows:
         notes = sorted(c.get("contact_notes") or [], key=lambda n: n["at"], reverse=True)
         last_note = notes[0]["text"][:200] if notes else None
         last = c.get("last_contact")
+        base_row = {
+            "name": c["name"],
+            "relationship": c.get("relationship") or "",
+            "last_note": last_note,
+        }
         if not last:
-            stale.append({
-                "name": c["name"],
-                "relationship": c.get("relationship") or "",
-                "last_contact": None,
-                "days_since": None,
-                "last_note": last_note,
-            })
+            stale.append({**base_row, "last_contact": None, "days_since": None})
             continue
         days_since = (today - date.fromisoformat(last)).days
         if days_since >= days:
-            stale.append({
-                "name": c["name"],
-                "relationship": c.get("relationship") or "",
-                "last_contact": last,
-                "days_since": days_since,
-                "last_note": last_note,
-            })
+            stale.append({**base_row, "last_contact": last, "days_since": days_since})
     stale.sort(key=lambda x: x["days_since"] or 99999, reverse=True)
     return {"ok": True, "count": len(stale), "stale": stale}
 
@@ -307,13 +387,28 @@ def pending_calendar_syncs() -> dict:
     (e.g. google_calendar_create_event) to add each one, then call
     mark_dates_synced to record success.
     """
-    rows = _sb_request(
-        "GET", "contact_dates",
-        params={
-            "select": "label,date_iso,contacts(name)",
-            "synced_to_calendar": "eq.false",
-        },
-    )
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    rows = sb("GET", "contact_dates", params={
+        "select": "label,date_iso,contacts(name)",
+        "synced_to_calendar": "eq.false",
+    })
     pending = [{
         "name": (d.get("contacts") or {}).get("name"),
         "label": d["label"],
@@ -329,15 +424,33 @@ def mark_dates_synced(name: str, label: str) -> dict:
     Mark a contact's date as synced to calendar so we don't re-add it.
     Call AFTER successfully creating a calendar event.
     """
-    cid = _find_contact_id_by_name(name)
-    if not cid:
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    found = sb("GET", "contacts",
+               params={"name": f"ilike.{name.strip()}", "select": "id", "limit": "1"})
+    if not found:
         return {"ok": False, "error": f"No contact named '{name}'."}
-    rows = _sb_request(
-        "PATCH", "contact_dates",
-        params={"contact_id": f"eq.{cid}", "label": f"eq.{label.strip().lower()}"},
-        body={"synced_to_calendar": True},
-        prefer="return=representation",
-    )
+    cid = found[0]["id"]
+    rows = sb("PATCH", "contact_dates",
+              params={"contact_id": f"eq.{cid}", "label": f"eq.{label.strip().lower()}"},
+              body={"synced_to_calendar": True},
+              prefer="return=representation")
     return {"ok": True, "marked": len(rows)}
 
 
@@ -350,20 +463,34 @@ def lookup_contacts_bulk(names: str) -> dict:
     Args:
         names: Comma-separated list of names (e.g. "Jane Smith, Mike Chen").
     """
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
     wanted = [n.strip() for n in names.split(",") if n.strip()]
     if not wanted:
         return {"ok": True, "found": {}, "missing": []}
 
-    # Build an OR filter: name=in.("Jane Smith","Mike Chen")
     quoted = ",".join(f'"{n}"' for n in wanted)
-    rows = _sb_request(
-        "GET", "contacts",
-        params={
-            "select": "name,company,relationship,tags,last_contact,"
-                      "contact_notes(text,at),contact_dates(label,date_iso)",
-            "name": f"in.({quoted})",
-        },
-    )
+    rows = sb("GET", "contacts", params={
+        "select": "name,company,relationship,tags,last_contact,"
+                  "contact_notes(text,at),contact_dates(label,date_iso)",
+        "name": f"in.({quoted})",
+    })
 
     found = {}
     for c in rows:
@@ -386,10 +513,26 @@ def get_reminded_meetings() -> dict:
     Return the set of calendar meeting IDs we have already texted a reminder
     for. Use this to avoid sending duplicate reminders for the same meeting.
     """
-    rows = _sb_request(
-        "GET", "reminded_meetings",
-        params={"select": "meeting_id", "order": "at.desc", "limit": "1000"},
-    )
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    rows = sb("GET", "reminded_meetings",
+              params={"select": "meeting_id", "order": "at.desc", "limit": "1000"})
     return {"ok": True, "reminded_ids": [r["meeting_id"] for r in rows]}
 
 
@@ -403,12 +546,27 @@ def mark_meeting_reminded(meeting_id: str, meeting_title: str) -> dict:
         meeting_id: The calendar event's unique ID.
         meeting_title: The event title (for logging).
     """
-    # Upsert via Prefer: resolution=merge-duplicates (meeting_id is PK)
-    _sb_request(
-        "POST", "reminded_meetings",
-        body={"meeting_id": meeting_id, "title": meeting_title},
-        prefer="resolution=merge-duplicates",
-    )
+    import os, json, urllib.parse, urllib.request
+
+    def sb(method, path, body=None, params=None, prefer=""):
+        base = os.environ["SUPABASE_URL"].rstrip("/")
+        key = os.environ["SUPABASE_KEY"]
+        url = f"{base}/rest/v1/{path}"
+        if params:
+            url += "?" + urllib.parse.urlencode(params, safe="=.,")
+        headers = {"apikey": key, "Authorization": f"Bearer {key}",
+                   "Content-Type": "application/json"}
+        if prefer:
+            headers["Prefer"] = prefer
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else []
+
+    sb("POST", "reminded_meetings",
+       body={"meeting_id": meeting_id, "title": meeting_title},
+       prefer="resolution=merge-duplicates")
     return {"ok": True, "logged": meeting_id}
 
 
@@ -574,6 +732,7 @@ app = ara.Automation(
     system_instructions=SYSTEM_INSTRUCTIONS,
     required_env=["SUPABASE_URL", "SUPABASE_KEY"],
     tools=[
+        debug_supabase_connect,
         add_contact,
         append_note,
         add_important_date,
