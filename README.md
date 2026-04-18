@@ -1,5 +1,7 @@
 # Personal CRM — Ara Agent
 
+![Personal CRM — the friend who remembers everyone you've ever met](cover.png)
+
 > The friend who remembers everyone you've ever met — so you don't have to.
 
 A personal CRM agent built on [Ara](https://ara.so), powered by Supabase,
