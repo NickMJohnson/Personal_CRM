@@ -264,22 +264,37 @@ def upcoming_dates(days_ahead: int = 30) -> dict:
 @ara.tool
 def stale_contacts(days: int = 60) -> dict:
     """
-    Return contacts you haven't talked to in `days` days — good for a nudge list.
+    Return contacts you haven't talked to in `days` days — includes the most
+    recent note on each so the agent can recommend WHAT to follow up about.
     """
     rows = _sb_request(
         "GET", "contacts",
-        params={"select": "name,last_contact"},
+        params={"select": "name,last_contact,relationship,contact_notes(text,at)"},
     )
     today = date.today()
     stale = []
     for c in rows:
+        notes = sorted(c.get("contact_notes") or [], key=lambda n: n["at"], reverse=True)
+        last_note = notes[0]["text"][:200] if notes else None
         last = c.get("last_contact")
         if not last:
-            stale.append({"name": c["name"], "last_contact": None, "days_since": None})
+            stale.append({
+                "name": c["name"],
+                "relationship": c.get("relationship") or "",
+                "last_contact": None,
+                "days_since": None,
+                "last_note": last_note,
+            })
             continue
         days_since = (today - date.fromisoformat(last)).days
         if days_since >= days:
-            stale.append({"name": c["name"], "last_contact": last, "days_since": days_since})
+            stale.append({
+                "name": c["name"],
+                "relationship": c.get("relationship") or "",
+                "last_contact": last,
+                "days_since": days_since,
+                "last_note": last_note,
+            })
     stale.sort(key=lambda x: x["days_since"] or 99999, reverse=True)
     return {"ok": True, "count": len(stale), "stale": stale}
 
@@ -446,18 +461,43 @@ ROUTING — figure out the user's intent and act:
 
    B) DAILY BRIEFING — only if current local time is between 09:00 and 09:10
       AND no briefing has been sent today:
-      1. Call upcoming_dates(days_ahead=7).
-      2. Call stale_contacts(days=60).
+      1. Call upcoming_dates(days_ahead=30).
+      2. Call stale_contacts(days=45).
       3. Call pending_calendar_syncs — sync any items to Google Calendar
          (see rule 4) before composing the briefing.
-      4. Compose in this format:
-           Good morning! Here's today:
-           🎂 Birthdays this week: <names + days away> (or "none")
-           📅 Follow-ups due: <names + dates> (or "none")
-           👋 Consider reaching out to: <1-3 stale contacts>
-      5. Send via linq_send_message.
+      4. From upcoming_dates, split the results:
+           - BIRTHDAYS_THIS_WEEK = items where label == 'birthday' and days_away <= 7
+           - UPCOMING_EVENTS = all other items (anniversaries, follow-ups,
+             deadlines, etc.), across the full 30-day window.
+      5. From stale_contacts, pick the top 3 most overdue where last_note is
+         non-empty. For each, derive a short "about what" suggestion from the
+         last_note (e.g. last_note "discussed her job search at Anthropic" →
+         "check in on Anthropic job search").
+      6. Compose in this format (skip any section that is empty):
+           Good morning! Your CRM briefing:
 
-   If neither A nor B has anything to do, reply with a short "nothing to
+           🎂 Birthdays this week:
+           • <Name> — in <N> days (<date>)
+
+           📅 Upcoming events:
+           • <label> — <Name> — <date> (in <N> days)
+
+           👋 Reach out to:
+           • <Name> (<relationship>, last talked <N> days ago)
+             └ about: <short suggestion derived from last_note>
+      7. Send via linq_send_message.
+
+   C) MIDDAY / AFTERNOON NUDGE — if current local time is between 13:00–13:10
+      OR 17:00–17:10, and a nudge hasn't already been sent in this window:
+      1. Call upcoming_dates(days_ahead=1).
+      2. Keep only items where days_away == 0 (happening today).
+      3. If none, do nothing.
+      4. If any, compose a short text and send via linq_send_message:
+           🔔 Today's reminders:
+           • 🎂 <Name>'s birthday
+           • 📅 <label> — <Name>
+
+   If none of A, B, or C have anything to do, reply with a short "nothing to
    report" and do NOT send any text — don't spam the user on quiet cron
    ticks.
 
