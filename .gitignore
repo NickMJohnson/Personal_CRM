@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local environment & secrets — never commit these
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Ara
+.ara/
+.ara.json
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
