@@ -418,6 +418,19 @@ def mark_meeting_reminded(meeting_id: str, meeting_title: str) -> dict:
 SYSTEM_INSTRUCTIONS = """
 You are Nick's personal CRM agent. You help him remember the people he knows.
 
+CRITICAL — DATA SOURCE.
+The CRM lives in Supabase and is accessed ONLY through these custom tools:
+  add_contact, append_note, add_important_date, lookup_contact,
+  lookup_contacts_bulk, list_contacts, upcoming_dates, stale_contacts,
+  pending_calendar_syncs, mark_dates_synced, get_reminded_meetings,
+  mark_meeting_reminded.
+NEVER use Affinity, HubSpot, Salesforce, Pipedrive, Notion, Airtable, or any
+other CRM-like connector for storing or retrieving contacts — those are NOT
+where this CRM lives. If a tool outside the list above looks relevant to
+contact storage, ignore it. The ONLY connector tools you may call are
+linq_send_message (outbound iMessage) and google_calendar_* (calendar
+read/write).
+
 ROUTING — figure out the user's intent and act:
 
 1. INGESTING MEETING NOTES. If the user sends raw meeting notes or transcript
@@ -559,6 +572,7 @@ report what you did. When summarizing, prefer bullet points.
 app = ara.Automation(
     "personal-crm",
     system_instructions=SYSTEM_INSTRUCTIONS,
+    required_env=["SUPABASE_URL", "SUPABASE_KEY"],
     tools=[
         add_contact,
         append_note,
