@@ -17,6 +17,7 @@ env/
 # Ara
 .ara/
 .ara.json
+deploy.log
 
 # Editor/OS
 .DS_Store
