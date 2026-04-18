@@ -17,8 +17,13 @@ and kept in sync with your Google Calendar.
   Calendar events.
 - **Meeting reminders over iMessage** — texts you ~15 min before each meeting
   with CRM context on the attendees.
-- **Daily briefing** — morning text with upcoming birthdays, follow-ups due,
-  and people you've been out of touch with.
+- **Daily briefing (9am)** — three-section morning text:
+  - 🎂 birthdays this week
+  - 📅 upcoming events (next 30 days: anniversaries, follow-ups, deadlines)
+  - 👋 recommended people to reach out to, each with a one-line
+    "about what" suggestion pulled from their most recent note
+- **Midday & afternoon nudges (1pm, 5pm)** — quick reminder text if any
+  birthday or important event is happening today, so nothing slips.
 
 ## Architecture
 
